@@ -4,7 +4,7 @@
 // dashboard (Site settings > Environment variables). Get a free key at
 // https://finnhub.io/register — no credit card required.
 
-let _cache = { key: '', at: 0, body: null };
+let _cache = new Map(); // symbol -> { at, data }
 const CACHE_TTL_MS = 60 * 1000;
 
 exports.handler = async (event) => {
@@ -30,12 +30,16 @@ exports.handler = async (event) => {
   }
 
   const cacheKey = symbols.slice().sort().join(',');
-  if (_cache.body && _cache.key === cacheKey && Date.now() - _cache.at < CACHE_TTL_MS) {
-    return { statusCode: 200, headers: { ...cors, 'Content-Type': 'application/json' }, body: _cache.body };
-  }
 
   try {
     const results = {};
+    const now = Date.now();
+    const toFetch = [];
+    symbols.forEach((sym) => {
+      const hit = _cache.get(sym);
+      if (hit && now - hit.at < CACHE_TTL_MS) results[sym] = hit.data;
+      else toFetch.push(sym);
+    });
     // Finnhub free tier is one symbol per call; run them in parallel.
     const fetchOne = async (sym) => {
       const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(sym)}&token=${apiKey}`);
@@ -53,26 +57,31 @@ exports.handler = async (event) => {
     // Batch concurrency: enough parallelism to finish before the function timeout,
     // gentle enough to avoid Finnhub's burst limit.
     const BATCH = 8, ROUND_DELAY_MS = 400;
-    for (let i = 0; i < symbols.length; i += BATCH) {
-      const batch = symbols.slice(i, i + BATCH);
+    for (let i = 0; i < toFetch.length; i += BATCH) {
+      const batch = toFetch.slice(i, i + BATCH);
       await Promise.all(batch.map(async (sym) => {
         try {
-          results[sym] = await fetchOne(sym);
+          const d = await fetchOne(sym);
+          results[sym] = d;
+          _cache.set(sym, { at: Date.now(), data: d });
         } catch (e) {
           try {
             await new Promise((r) => setTimeout(r, 500));
-            results[sym] = await fetchOne(sym);
+            const d = await fetchOne(sym);
+            results[sym] = d;
+            _cache.set(sym, { at: Date.now(), data: d });
           } catch (e2) {
             console.error('quotes: failed for', sym, '-', e2.message);
-            results[sym] = { error: e2.message };
+            // Serve stale cache rather than nothing if we have it, even past TTL.
+            const stale = _cache.get(sym);
+            results[sym] = stale ? stale.data : { error: e2.message };
           }
         }
       }));
-      if (i + BATCH < symbols.length) await new Promise((r) => setTimeout(r, ROUND_DELAY_MS));
+      if (i + BATCH < toFetch.length) await new Promise((r) => setTimeout(r, ROUND_DELAY_MS));
     }
 
     const body = JSON.stringify({ quotes: results, fetchedAt: new Date().toISOString() });
-    _cache = { key: cacheKey, at: Date.now(), body };
     return {
       statusCode: 200,
       headers: { ...cors, 'Content-Type': 'application/json' },
