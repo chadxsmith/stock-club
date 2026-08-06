@@ -3,7 +3,7 @@
 // Returns { analyst: { SYM: { strongBuy, buy, hold, sell, strongSell, total, period } | { error } } }
 // Uses the same FINNHUB_API_KEY env var as quotes.js.
 
-let _cache = { key: '', at: 0, body: null };
+const _cache = new Map(); // symbol -> { at, data }
 const CACHE_TTL_MS = 60 * 60 * 1000; // analyst counts move slowly; cache an hour
 
 exports.handler = async (event) => {
@@ -25,12 +25,17 @@ exports.handler = async (event) => {
     return { statusCode: 400, headers: cors, body: JSON.stringify({ error: 'Missing symbols query param' }) };
   }
 
-  const cacheKey = symbols.slice().sort().join(',');
-  if (_cache.body && _cache.key === cacheKey && Date.now() - _cache.at < CACHE_TTL_MS) {
-    return { statusCode: 200, headers: { ...cors, 'Content-Type': 'application/json' }, body: _cache.body };
-  }
-
   const analyst = {};
+  const now = Date.now();
+  const toFetch = [];
+  symbols.forEach((sym) => {
+    const hit = _cache.get(sym);
+    if (hit && now - hit.at < CACHE_TTL_MS) analyst[sym] = hit.data;
+    else toFetch.push(sym);
+  });
+  if (!toFetch.length) {
+    return { statusCode: 200, headers: { ...cors, 'Content-Type': 'application/json' }, body: JSON.stringify({ analyst, fetchedAt: new Date().toISOString() }) };
+  }
   const fetchOne = async (sym) => {
     const res = await fetch(`https://finnhub.io/api/v1/stock/recommendation?symbol=${encodeURIComponent(sym)}&token=${apiKey}`);
     if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -48,21 +53,20 @@ exports.handler = async (event) => {
   const DEADLINE_MS = Date.now() + 8000;
   const BATCH = 8, ROUND_DELAY_MS = 300;
   const failed = [];
-  for (let i = 0; i < symbols.length && Date.now() < DEADLINE_MS; i += BATCH) {
-    const batch = symbols.slice(i, i + BATCH);
+  for (let i = 0; i < toFetch.length && Date.now() < DEADLINE_MS; i += BATCH) {
+    const batch = toFetch.slice(i, i + BATCH);
     await Promise.all(batch.map(async (sym) => {
-      try { analyst[sym] = await fetchOne(sym); } catch (e) { failed.push(sym); }
+      try { const d = await fetchOne(sym); analyst[sym] = d; _cache.set(sym, { at: Date.now(), data: d }); } catch (e) { failed.push(sym); }
     }));
-    if (i + BATCH < symbols.length) await new Promise((r) => setTimeout(r, ROUND_DELAY_MS));
+    if (i + BATCH < toFetch.length) await new Promise((r) => setTimeout(r, ROUND_DELAY_MS));
   }
   if (failed.length && Date.now() < DEADLINE_MS) {
     await new Promise((r) => setTimeout(r, 400));
     await Promise.all(failed.map(async (sym) => {
-      try { analyst[sym] = await fetchOne(sym); } catch (e2) { analyst[sym] = { error: e2.message }; }
+      try { const d = await fetchOne(sym); analyst[sym] = d; _cache.set(sym, { at: Date.now(), data: d }); } catch (e2) { analyst[sym] = { error: e2.message }; }
     }));
   }
 
   const body = JSON.stringify({ analyst, fetchedAt: new Date().toISOString() });
-  _cache = { key: cacheKey, at: Date.now(), body };
   return { statusCode: 200, headers: { ...cors, 'Content-Type': 'application/json' }, body };
 };
