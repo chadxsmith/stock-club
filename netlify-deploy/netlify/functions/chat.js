@@ -117,7 +117,7 @@ exports.handler = async (event) => {
     content: typeof m.content === 'string' ? m.content : m.content,
   }));
 
-  const callClaude = async () => {
+  const callClaude = async (forceTool) => {
     const res = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
@@ -131,6 +131,10 @@ exports.handler = async (event) => {
         system: fullSystem,
         messages: convo,
         tools: [STOCK_TOOL],
+        // Force the first turn to ground itself via the tool rather than trusting
+        // the model to opt in on its own — this is what actually stops invented
+        // numbers; the instruction alone is not enough.
+        ...(forceTool ? { tool_choice: { type: 'any' } } : {}),
       }),
     });
     const data = await res.json();
@@ -139,7 +143,7 @@ exports.handler = async (event) => {
   };
 
   try {
-    let data = await callClaude();
+    let data = await callClaude(true);
     let hops = 0;
     const MAX_TOOL_HOPS = 4;
 
