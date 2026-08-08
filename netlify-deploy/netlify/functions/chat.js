@@ -12,12 +12,15 @@ const QUOTE_TTL_MS = 60 * 1000;
 const ANALYST_TTL_MS = 60 * 60 * 1000;
 
 async function withRetry(fn) {
-  try { return await fn(); }
-  catch (e) {
-    if (!/HTTP 429/.test(String(e && e.message))) throw e;
-    await new Promise((r) => setTimeout(r, 600));
-    return fn();
+  const delays = [500, 1200];
+  for (let i = 0; i < delays.length; i++) {
+    try { return await fn(); }
+    catch (e) {
+      if (!/HTTP 429/.test(String(e && e.message))) throw e;
+      await new Promise((r) => setTimeout(r, delays[i]));
+    }
   }
+  return fn();
 }
 
 async function fetchQuote(sym, apiKey) {
