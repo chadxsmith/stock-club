@@ -160,6 +160,7 @@ exports.handler = async (event) => {
           const record = await getStockFromDb(tu.input && tu.input.ticker, finnhubKey);
           resultPayload = JSON.stringify(record);
         } catch (toolErr) {
+          console.error('get_stock_from_db failed for', tu.input && tu.input.ticker, '-', toolErr && toolErr.message || toolErr);
           resultPayload = JSON.stringify({ ticker: (tu.input && tu.input.ticker) || null, error: String(toolErr && toolErr.message || toolErr) });
         }
         toolResults.push({ type: 'tool_result', tool_use_id: tu.id, content: resultPayload });
