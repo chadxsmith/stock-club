@@ -5,6 +5,8 @@
 // https://finnhub.io/register — no credit card required.
 
 let _cache = new Map(); // symbol -> { at, data }
+let _rateLimitedUntil = 0; // set on a 429 — stop calling Finnhub until it passes
+const RATE_LIMIT_COOLDOWN_MS = 60 * 1000;
 const CACHE_TTL_MS = 60 * 1000;
 // Poller runs every 2 min; accept a store record up to 10 min old before going live.
 const STORE_TTL_MS = 10 * 60 * 1000;
@@ -60,8 +62,12 @@ exports.handler = async (event) => {
     });
     // Finnhub free tier is one symbol per call; run them in parallel.
     const fetchOne = async (sym) => {
+      if (Date.now() < _rateLimitedUntil) throw new Error('rate limited, serving cache');
       const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(sym)}&token=${apiKey}`);
       if (!res.ok) {
+        // A 429 means the shared key is out of budget this minute. Retrying
+        // immediately makes it worse, so back everything off instead.
+        if (res.status === 429) _rateLimitedUntil = Date.now() + RATE_LIMIT_COOLDOWN_MS;
         const body = await res.text().catch(() => '');
         throw new Error('HTTP ' + res.status + (body ? ': ' + body.slice(0, 200) : ''));
       }
@@ -84,6 +90,7 @@ exports.handler = async (event) => {
           _cache.set(sym, { at: Date.now(), data: d });
         } catch (e) {
           try {
+            if (Date.now() < _rateLimitedUntil) throw e; // don't retry into a 429
             await new Promise((r) => setTimeout(r, 500));
             const d = await fetchOne(sym);
             results[sym] = d;
