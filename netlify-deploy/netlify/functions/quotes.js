@@ -6,6 +6,8 @@
 
 let _cache = new Map(); // symbol -> { at, data }
 const CACHE_TTL_MS = 60 * 1000;
+// Poller runs every 2 min; accept a store record up to 10 min old before going live.
+const STORE_TTL_MS = 10 * 60 * 1000;
 
 exports.handler = async (event) => {
   const cors = {
@@ -29,13 +31,29 @@ exports.handler = async (event) => {
     return { statusCode: 400, headers: cors, body: JSON.stringify({ error: 'Missing symbols query param, e.g. ?symbols=NVDA,MU' }) };
   }
 
-  const cacheKey = symbols.slice().sort().join(',');
-
   try {
     const results = {};
     const now = Date.now();
     const toFetch = [];
+
+    // 1) Shared store first. The scheduled poller refreshes every ~2 min, so for
+    // tracked tickers this answers without spending any Finnhub budget — which is
+    // what kept the tail of a 60+ symbol request falling back to seed prices.
+    let stored = {};
+    try {
+      const { getStockRecord } = require('./lib/stock-store');
+      const recs = await Promise.all(symbols.map(async (sym) => {
+        try { return [sym, await getStockRecord(sym)]; } catch (e) { return [sym, null]; }
+      }));
+      recs.forEach(([sym, rec]) => {
+        if (rec && typeof rec.price === 'number' && rec.price > 0 && now - (rec.updatedAt || 0) < STORE_TTL_MS) {
+          stored[sym] = { price: rec.price, changePct: rec.changePct, prevClose: rec.prevClose, source: 'store' };
+        }
+      });
+    } catch (e) { /* blobs unavailable — fall through to live fetch */ }
+
     symbols.forEach((sym) => {
+      if (stored[sym]) { results[sym] = stored[sym]; return; }
       const hit = _cache.get(sym);
       if (hit && now - hit.at < CACHE_TTL_MS) results[sym] = hit.data;
       else toFetch.push(sym);
