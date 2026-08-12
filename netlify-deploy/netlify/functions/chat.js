@@ -105,6 +105,9 @@ const STOCK_TOOL = {
   },
 };
 
+const EPISODE_TRANSCRIPT = require('./lib/episode-transcript');
+const TRANSCRIPT_RULE = "Below is the transcript of the most recent Market Mondays episode. Use it as the source of truth for what the hosts actually said \u2014 who said it, when in the episode, and their reasoning. Quote or paraphrase it when the user asks what was said about a stock or topic. Never attribute an opinion to Rashad, Troy, or Ian that is not in this transcript, and never treat any number inside it as current market data (prices and metrics still come only from get_stock_from_db). If something wasn't discussed in the episode, say so.\n\n";
+
 const GROUNDING_RULE = "You must never invent, guess, estimate, or recall from memory any stock price, percent change, or analyst buy/hold/sell rating or count. For every specific ticker you discuss, call get_stock_from_db to get that ticker's real data before stating any metric about it, and only state numbers that tool returns. If the tool returns an error or missing data for a ticker, tell the user live data is unavailable for that ticker \u2014 do not substitute a guess, a typical range, or a remembered figure. Non-numeric context (which show mentioned a ticker, why, general commentary) may come from the conversation context, but every metric must come from the tool.";
 
 exports.handler = async (event) => {
@@ -139,7 +142,7 @@ exports.handler = async (event) => {
     return { statusCode: 400, headers: cors, body: JSON.stringify({ error: 'Missing messages array' }) };
   }
 
-  const fullSystem = (system ? system + '\n\n' : '') + GROUNDING_RULE;
+  const fullSystem = (system ? system + '\n\n' : '') + GROUNDING_RULE + '\n\n' + TRANSCRIPT_RULE + EPISODE_TRANSCRIPT;
   // Anthropic messages use content as either a string or an array of blocks;
   // normalize incoming history to blocks so we can append tool_use/tool_result turns.
   let convo = messages.map((m) => ({
