@@ -10,7 +10,7 @@
 <script>
 (function () {
   var coarse = window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
-  var wide = Math.min(window.innerWidth, screen.width) >= 1024;
+  var wide = Math.min(window.innerWidth, screen.width) >= 1180;
   var q = location.search;
   var forced = /[?&]view=(desktop|mobile)/.exec(q);
   var target = forced ? forced[1] : (wide && !coarse ? 'desktop' : 'mobile');
