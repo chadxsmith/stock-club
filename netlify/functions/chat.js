@@ -8,8 +8,10 @@
 
 const _quoteCache = new Map(); // symbol -> { at, data }
 const _analystCache = new Map();
+const _newsCache = new Map();
 const QUOTE_TTL_MS = 60 * 1000;
 const ANALYST_TTL_MS = 60 * 60 * 1000;
+const NEWS_TTL_MS = 10 * 60 * 1000;
 
 async function withRetry(fn) {
   const delays = [500, 1200];
@@ -56,6 +58,46 @@ const fetchAnalyst = async (sym, apiKey) => {
     return out;
   });
 };
+
+// Why a stock is moving lives in headlines, not in price data. Finnhub's
+// company-news endpoint is on the same key we already hold, so this costs no new
+// integration — without it "why is DELL down" is structurally unanswerable and
+// the model correctly refuses.
+async function fetchNews(rawTicker, apiKey, days) {
+  const ticker = String(rawTicker || '').trim().toUpperCase();
+  if (!ticker) return { ticker, error: 'No ticker provided' };
+  const span = Math.min(Math.max(Number(days) || 7, 1), 30);
+  const cacheKey = ticker + ':' + span;
+  const hit = _newsCache.get(cacheKey);
+  if (hit && Date.now() - hit.at < NEWS_TTL_MS) return hit.data;
+
+  const iso = (d) => d.toISOString().slice(0, 10);
+  const to = new Date();
+  const from = new Date(to.getTime() - span * 86400000);
+  const url = `https://finnhub.io/api/v1/company-news?symbol=${encodeURIComponent(ticker)}&from=${iso(from)}&to=${iso(to)}&token=${apiKey}`;
+
+  const out = await withRetry(async () => {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error('news HTTP ' + res.status);
+    const rows = await res.json();
+    if (!Array.isArray(rows) || !rows.length) {
+      return { ticker, windowDays: span, articles: [], note: 'No company news published in this window.' };
+    }
+    const articles = rows
+      .sort((a, b) => (b.datetime || 0) - (a.datetime || 0))
+      .slice(0, 8)
+      .map((r) => ({
+        headline: r.headline,
+        summary: String(r.summary || '').slice(0, 400),
+        source: r.source,
+        url: r.url,
+        published: r.datetime ? new Date(r.datetime * 1000).toISOString() : null,
+      }));
+    return { ticker, windowDays: span, articles };
+  });
+  _newsCache.set(cacheKey, { at: Date.now(), data: out });
+  return out;
+}
 
 // The one source of truth Claude is allowed to cite numbers from. Checks the
 // shared poller-fed store first (covers the ~60 tracked tickers with no
@@ -105,10 +147,25 @@ const STOCK_TOOL = {
   },
 };
 
+const NEWS_TOOL = {
+  name: 'get_company_news',
+  description: "Fetch recent published news headlines and summaries for a single stock ticker. Call this whenever the user asks WHY a stock moved, what happened to it, what the news is, or anything about earnings, announcements, downgrades, or catalysts. Returns real published articles with dates and sources.",
+  input_schema: {
+    type: 'object',
+    properties: {
+      ticker: { type: 'string', description: 'Stock ticker symbol, e.g. NVDA, MU, DELL' },
+      days: { type: 'number', description: 'How many days back to search, 1-30. Use 2 for "today/why is it moving", 7 for general context.' },
+    },
+    required: ['ticker'],
+  },
+};
+
 const EPISODE_TRANSCRIPT = require('./lib/episode-transcript');
 const TRANSCRIPT_RULE = "Below is the transcript of the most recent Market Mondays episode. Lead with the real data \u2014 price, change, and analyst ratings from get_stock_from_db \u2014 and use the hosts' reasoning only as brief color layered on top of it, at most a sentence, when it genuinely sharpens the picture (why they like the sector, a level they named, a risk they flagged). Do not open with what the hosts said, do not build an answer around their opinions, and do not name-drop or quote at length; a light 'the show framed this as...' is the right weight. Do not repeat it every message. If the user asks directly what was said on the episode, then answer that fully from this transcript. Never attribute an opinion to Rashad, Troy, or Ian that is not in this transcript, and never treat any number inside it as current market data. If something wasn't discussed, say so.\n\n";
 
 const GROUNDING_RULE = "You must never invent, guess, estimate, or recall from memory any stock price, percent change, or analyst buy/hold/sell rating or count. For every specific ticker you discuss, call get_stock_from_db to get that ticker's real data before stating any metric about it, and only state numbers that tool returns. If the tool returns an error or missing data for a ticker, tell the user live data is unavailable for that ticker \u2014 do not substitute a guess, a typical range, or a remembered figure. Non-numeric context (which show mentioned a ticker, why, general commentary) may come from the conversation context, but every metric must come from the tool.";
+
+const NEWS_RULE = "When the user asks why a stock is moving, what happened to it, or about earnings, downgrades, or catalysts, call get_company_news for that ticker \u2014 do NOT reply that you lack access to news and do NOT tell the user to go check an investor relations page or search elsewhere. Pair it with get_stock_from_db so you state the real move alongside the reason. Attribute each reason to its headline and date in plain language ('Reuters reported Tuesday that...'). If the headlines do not actually explain the move, say the move has no clear news catalyst in the last few days rather than inventing one, and note that daily moves are often just sector or index drift.";
 
 exports.handler = async (event) => {
   const cors = {
@@ -142,7 +199,7 @@ exports.handler = async (event) => {
     return { statusCode: 400, headers: cors, body: JSON.stringify({ error: 'Missing messages array' }) };
   }
 
-  const fullSystem = (system ? system + '\n\n' : '') + GROUNDING_RULE + '\n\n' + TRANSCRIPT_RULE + EPISODE_TRANSCRIPT;
+  const fullSystem = (system ? system + '\n\n' : '') + GROUNDING_RULE + '\n\n' + NEWS_RULE + '\n\n' + TRANSCRIPT_RULE + EPISODE_TRANSCRIPT;
   // Anthropic messages use content as either a string or an array of blocks;
   // normalize incoming history to blocks so we can append tool_use/tool_result turns.
   let convo = messages.map((m) => ({
@@ -163,7 +220,7 @@ exports.handler = async (event) => {
         max_tokens: 700,
         system: fullSystem,
         messages: convo,
-        tools: [STOCK_TOOL],
+        tools: [STOCK_TOOL, NEWS_TOOL],
         // Force the first turn to ground itself via the tool rather than trusting
         // the model to opt in on its own — this is what actually stops invented
         // numbers; the instruction alone is not enough.
@@ -178,7 +235,7 @@ exports.handler = async (event) => {
   try {
     let data = await callClaude(true);
     let hops = 0;
-    const MAX_TOOL_HOPS = 4;
+    const MAX_TOOL_HOPS = 6;
 
     while (data.stop_reason === 'tool_use' && hops < MAX_TOOL_HOPS) {
       hops += 1;
@@ -190,10 +247,12 @@ exports.handler = async (event) => {
         let resultPayload;
         try {
           if (!finnhubKey) throw new Error('Live stock database is not configured (FINNHUB_API_KEY missing)');
-          const record = await getStockFromDb(tu.input && tu.input.ticker, finnhubKey);
+          const record = tu.name === 'get_company_news'
+            ? await fetchNews(tu.input && tu.input.ticker, finnhubKey, tu.input && tu.input.days)
+            : await getStockFromDb(tu.input && tu.input.ticker, finnhubKey);
           resultPayload = JSON.stringify(record);
         } catch (toolErr) {
-          console.error('get_stock_from_db failed for', tu.input && tu.input.ticker, '-', toolErr && toolErr.message || toolErr);
+          console.error(tu.name + ' failed for', tu.input && tu.input.ticker, '-', toolErr && toolErr.message || toolErr);
           resultPayload = JSON.stringify({ ticker: (tu.input && tu.input.ticker) || null, error: String(toolErr && toolErr.message || toolErr) });
         }
         toolResults.push({ type: 'tool_result', tool_use_id: tu.id, content: resultPayload });
