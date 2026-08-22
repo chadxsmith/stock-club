@@ -11,7 +11,7 @@
 // Instead we rotate: each run refreshes a slice of the universe, so the full
 // list comes around every few minutes and each run stays far under the limit,
 // leaving headroom for live user traffic.
-const { stockStore, getStockRecord, setStockRecord } = require('./lib/stock-store');
+const { stockStore, getStockRecord, setStockRecord, probeStore } = require('./lib/stock-store');
 const TICKERS = require('./lib/tracked-tickers');
 
 // Universe is 88 tickers. At 24/run every 2 min the full list comes around in
@@ -40,7 +40,20 @@ async function getJson(url) {
 
 exports.handler = async () => {
   const apiKey = process.env.FINNHUB_API_KEY;
-  if (!apiKey) return { statusCode: 500, body: 'FINNHUB_API_KEY not set' };
+  if (!apiKey) return { statusCode: 500, body: JSON.stringify({ error: 'FINNHUB_API_KEY not set' }) };
+
+  // Fail fast and loudly if the store is unreachable. Previously every write
+  // threw a BlobsInternalError, the handler died in ~200ms, the cursor never
+  // advanced, and the only symptom was a stale-looking UI. Burning Finnhub
+  // quota to write nowhere is also pointless.
+  const store = await probeStore();
+  if (!store.ok) {
+    console.error('poll-stocks: store unavailable (' + store.mode + ') -', store.error, '|', store.hint || '');
+    return {
+      statusCode: 200,
+      body: JSON.stringify({ ok: false, storeUnavailable: true, mode: store.mode, error: store.error, hint: store.hint, at: new Date().toISOString() }),
+    };
+  }
 
   const start = await readCursor();
   const slice = [];
@@ -60,7 +73,7 @@ exports.handler = async () => {
     return !r || !r.analystRatings || !r.analystAt || (Date.now() - r.analystAt) > ANALYST_TTL_MS;
   }).slice(0, MAX_ANALYST_PER_RUN);
 
-  let ok = 0, failed = 0, rateLimited = false;
+  let ok = 0, failed = 0, writeFailed = 0, rateLimited = false;
 
   const BATCH = 5, ROUND_DELAY_MS = 1200; // ~5 calls per 1.2s => well under 60/min
   for (let i = 0; i < slice.length; i += BATCH) {
@@ -92,19 +105,26 @@ exports.handler = async () => {
         }
       }
       // Never overwrite a good record with nulls just because one call failed.
-      if (!quote && !analyst && prev.price == null) {
-        await setStockRecord(sym, { ticker: sym, price: null, changePct: null, prevClose: null, analystRatings: null, error: 'No live data available for this ticker' });
-        return;
+      // Writes are guarded so a single store failure can't reject out of the
+      // Promise.all and kill the whole run mid-rotation.
+      try {
+        if (!quote && !analyst && prev.price == null) {
+          await setStockRecord(sym, { ticker: sym, price: null, changePct: null, prevClose: null, analystRatings: null, error: 'No live data available for this ticker' });
+          return;
+        }
+        await setStockRecord(sym, {
+          ticker: sym,
+          price: quote ? quote.price : (prev.price ?? null),
+          changePct: quote ? quote.changePct : (prev.changePct ?? null),
+          prevClose: quote ? quote.prevClose : (prev.prevClose ?? null),
+          analystRatings: analyst,
+          analystAt,
+        });
+        if (quote) ok++;
+      } catch (e) {
+        writeFailed++;
+        console.error('poll-stocks: store write failed for', sym, '-', e.message);
       }
-      await setStockRecord(sym, {
-        ticker: sym,
-        price: quote ? quote.price : (prev.price ?? null),
-        changePct: quote ? quote.changePct : (prev.changePct ?? null),
-        prevClose: quote ? quote.prevClose : (prev.prevClose ?? null),
-        analystRatings: analyst,
-        analystAt,
-      });
-      if (quote) ok++;
     }));
     if (i + BATCH < slice.length) await new Promise((r) => setTimeout(r, ROUND_DELAY_MS));
   }
@@ -115,7 +135,8 @@ exports.handler = async () => {
   return {
     statusCode: 200,
     body: JSON.stringify({
-      polled: slice.length, updated: ok, failed, rateLimited,
+      polled: slice.length, updated: ok, failed, writeFailed, rateLimited,
+      storeMode: store.mode,
       analystRefreshed: needAnalyst.length,
       window: slice[0] + '\u2026' + slice[slice.length - 1],
       nextCursor: (start + slice.length) % TICKERS.length,

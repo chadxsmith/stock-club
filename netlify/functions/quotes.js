@@ -43,17 +43,28 @@ exports.handler = async (event) => {
     // tracked tickers this answers without spending any Finnhub budget — which is
     // what kept the tail of a 60+ symbol request falling back to seed prices.
     let stored = {};
+    // Probe once. A misconfigured store throws identically for all 55 symbols, and
+    // swallowing that made a Blobs 401 look like Finnhub staleness in the UI.
+    let store = { ok: false, mode: 'unknown', error: 'store not attempted' };
     try {
-      const { getStockRecord } = require('./lib/stock-store');
-      const recs = await Promise.all(symbols.map(async (sym) => {
-        try { return [sym, await getStockRecord(sym)]; } catch (e) { return [sym, null]; }
-      }));
-      recs.forEach(([sym, rec]) => {
-        if (rec && typeof rec.price === 'number' && rec.price > 0 && now - (rec.updatedAt || 0) < STORE_TTL_MS) {
-          stored[sym] = { price: rec.price, changePct: rec.changePct, prevClose: rec.prevClose, source: 'store' };
-        }
-      });
-    } catch (e) { /* blobs unavailable — fall through to live fetch */ }
+      const { getStockRecord, probeStore } = require('./lib/stock-store');
+      store = await probeStore();
+      if (store.ok) {
+        const recs = await Promise.all(symbols.map(async (sym) => {
+          try { return [sym, await getStockRecord(sym)]; } catch (e) { return [sym, null]; }
+        }));
+        recs.forEach(([sym, rec]) => {
+          if (rec && typeof rec.price === 'number' && rec.price > 0 && now - (rec.updatedAt || 0) < STORE_TTL_MS) {
+            stored[sym] = { price: rec.price, changePct: rec.changePct, prevClose: rec.prevClose, source: 'store' };
+          }
+        });
+      } else {
+        console.error('quotes: store unavailable (' + store.mode + ') -', store.error, '|', store.hint || '');
+      }
+    } catch (e) {
+      store = { ok: false, mode: 'unknown', error: String(e && e.message || e) };
+      console.error('quotes: store module failed -', store.error);
+    }
 
     symbols.forEach((sym) => {
       if (stored[sym]) { results[sym] = stored[sym]; return; }
@@ -107,7 +118,14 @@ exports.handler = async (event) => {
       if (i + BATCH < toFetch.length) await new Promise((r) => setTimeout(r, ROUND_DELAY_MS));
     }
 
-    const body = JSON.stringify({ quotes: results, fetchedAt: new Date().toISOString() });
+    // `store` tells the client whether the warm cache is working. Without it a
+    // 401 is indistinguishable from rate-limited staleness.
+    const fromStore = Object.values(results).filter((r) => r && r.source === 'store').length;
+    const body = JSON.stringify({
+      quotes: results,
+      fetchedAt: new Date().toISOString(),
+      store: { ...store, served: fromStore, requested: symbols.length, liveFetched: toFetch.length },
+    });
     return {
       statusCode: 200,
       headers: { ...cors, 'Content-Type': 'application/json' },
