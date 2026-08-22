@@ -76,4 +76,19 @@ async function probeStore(name) {
   }
 }
 
-module.exports = { resolveStore, probeStore };
+// Returns the store, or null if Blobs is unreachable. Callers that can degrade
+// gracefully should use this: on-demand functions on this project are currently
+// refused by Blobs (401) while the scheduled poller is allowed through, and a
+// throw here turns a soft feature failure into a 500 crash page.
+async function tryResolveStore(name) {
+  try {
+    return await resolveStore(name);
+  } catch (err) {
+    console.error('blob-store: ' + name + ' unavailable, degrading -', err.message);
+    return null;
+  }
+}
+
+const UNAVAILABLE = 'Storage is temporarily unavailable, so this could not be saved. Nothing was lost \u2014 try again shortly.';
+
+module.exports = { resolveStore, tryResolveStore, probeStore, UNAVAILABLE };

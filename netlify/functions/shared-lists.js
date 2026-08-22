@@ -6,7 +6,7 @@
 //   action "removeStock" { listId, ticker }                  -> remove a ticker
 //   action "createList"  { name, avatarColors, email, name2 } -> create a new shared list, returns { id }
 //   action "join"        { listId, email, name }             -> register a real member on a list
-const { resolveStore } = require('./lib/blob-store');
+const { tryResolveStore, UNAVAILABLE } = require('./lib/blob-store');
 
 const KEY = 'shared-lists.json';
 const DEFAULT_DATA = {
@@ -51,7 +51,7 @@ async function sendStockAddedEmails(listName, listId, ticker, addedBy, members) 
 }
 
 function getStoreInstance() {
-  return resolveStore('mm-shared-lists');
+  return tryResolveStore('mm-shared-lists');
 }
 
 function withMemberCounts(data) {
@@ -75,11 +75,14 @@ exports.handler = async (event) => {
   const store = await getStoreInstance();
 
   if (event.httpMethod === 'GET') {
+    // Read degrades to the empty default; a write cannot degrade, so it says so.
+    if (!store) return { statusCode: 200, headers: { ...cors, 'Content-Type': 'application/json' }, body: JSON.stringify({ ...withMemberCounts(DEFAULT_DATA), degraded: true }) };
     const data = (await store.get(KEY, { type: 'json' })) || DEFAULT_DATA;
     return { statusCode: 200, headers: { ...cors, 'Content-Type': 'application/json' }, body: JSON.stringify(withMemberCounts(data)) };
   }
 
   if (event.httpMethod === 'POST') {
+    if (!store) return { statusCode: 503, headers: { ...cors, 'Content-Type': 'application/json' }, body: JSON.stringify({ ok: false, degraded: true, error: UNAVAILABLE }) };
     let payload;
     try {
       payload = JSON.parse(event.body || '{}');

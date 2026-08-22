@@ -2,7 +2,7 @@
 // POST /.netlify/functions/events   { type, meta, ts }   -> append one event
 // GET  /.netlify/functions/events                        -> { events: [...] }
 // DELETE /.netlify/functions/events                       -> clear store
-const { resolveStore } = require('./lib/blob-store');
+const { tryResolveStore } = require('./lib/blob-store');
 
 const MAX_EVENTS = 5000;
 
@@ -14,8 +14,18 @@ exports.handler = async (event) => {
   };
   if (event.httpMethod === 'OPTIONS') return { statusCode: 200, headers: cors, body: '' };
 
-  const store = await resolveStore('mm-usage-events');
+  const store = await tryResolveStore('mm-usage-events');
   const KEY = 'events.json';
+
+  // Usage telemetry is the least important thing on the site — when Blobs is
+  // unreachable it degrades silently rather than erroring in the client.
+  if (!store) {
+    return {
+      statusCode: 200,
+      headers: { ...cors, 'Content-Type': 'application/json' },
+      body: JSON.stringify(event.httpMethod === 'GET' ? { events: [], degraded: true } : { ok: false, degraded: true }),
+    };
+  }
 
   if (event.httpMethod === 'GET') {
     const events = (await store.get(KEY, { type: 'json' })) || [];
