@@ -59,7 +59,7 @@ exports.handler = async (event) => {
           }
         });
       } else {
-        console.error('quotes: store unavailable (' + store.mode + ') -', store.error, '|', store.hint || '');
+        console.error('quotes: store unavailable, tried [' + (store.tried || []).join(', ') + '] -', store.error, '|', store.hint || '');
       }
     } catch (e) {
       store = { ok: false, mode: 'unknown', error: String(e && e.message || e) };

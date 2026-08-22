@@ -2,62 +2,96 @@
 // written by the scheduled poller, read by chat.js and quotes.js (and anything
 // else that wants live data without hitting Finnhub directly).
 //
-// Failures here used to be swallowed by every caller, which meant a broken
-// store was indistinguishable from stale prices: the UI reported "17 tickers
-// out of date" (pointing at Finnhub rate limits) while the real cause was a
-// Blobs 401. Errors are now tagged so callers can say which it is.
+// Auth is resolved at runtime rather than assumed. Explicit credentials
+// (BLOBS_SITE_ID + BLOBS_TOKEN) were returning a hard 401 here while the
+// implicit runtime context worked for other stores on the same project, so we
+// probe each candidate once and keep whichever authenticates. Picking one mode
+// blindly is what kept this store empty — and because every caller swallowed
+// the error, the UI reported it as "17 tickers out of date" (i.e. Finnhub rate
+// limits) rather than a broken cache.
 const { getStore } = require('@netlify/blobs');
 
-// Implicit getStore() relies on Netlify injecting a Blobs context at runtime.
-// Upload-based deploys with no build step often don't get it, yielding a 401 —
-// set BLOBS_SITE_ID and BLOBS_TOKEN to use explicit credentials instead.
-function blobsMode() {
-  return (process.env.BLOBS_SITE_ID && process.env.BLOBS_TOKEN) ? 'explicit' : 'implicit';
+const STORE_NAME = 'mm-stock-cache';
+
+let _resolved = null;   // { store, mode } once a mode authenticates
+let _lastError = null;
+
+function build(mode) {
+  return mode === 'explicit'
+    ? getStore({ name: STORE_NAME, siteID: process.env.BLOBS_SITE_ID, token: process.env.BLOBS_TOKEN })
+    : getStore(STORE_NAME);
 }
 
-function stockStore() {
-  return blobsMode() === 'explicit'
-    ? getStore({ name: 'mm-stock-cache', siteID: process.env.BLOBS_SITE_ID, token: process.env.BLOBS_TOKEN })
-    : getStore('mm-stock-cache');
+function candidates() {
+  const list = [];
+  if (process.env.BLOBS_SITE_ID && process.env.BLOBS_TOKEN) list.push('explicit');
+  list.push('implicit');
+  return list;
 }
 
 // A store that can't authenticate is a configuration problem, not a data
 // problem. Tag it so callers report it as such rather than as a cache miss.
-function tag(err) {
+function tag(err, tried) {
   const msg = String((err && err.message) || err);
   const e = new Error(msg);
   e.storeUnavailable = /401|403|BlobsInternalError|unauthor/i.test(msg);
-  e.blobsMode = blobsMode();
-  if (e.storeUnavailable) {
-    e.hint = blobsMode() === 'implicit'
-      ? 'Blobs rejected the implicit runtime context. Set BLOBS_SITE_ID and BLOBS_TOKEN env vars, then redeploy.'
-      : 'Blobs rejected BLOBS_SITE_ID/BLOBS_TOKEN. Check the site ID and that the personal access token is valid.';
-  }
+  e.tried = tried || [];
+  e.hint = 'Blobs rejected every auth mode tried (' + e.tried.join(', ') + '). '
+    + 'Check that BLOBS_SITE_ID matches the project ID and BLOBS_TOKEN is a live '
+    + 'personal access token — or clear both to force the implicit runtime context.';
   return e;
 }
 
+// Probe each mode once, cache the winner. A read is enough to prove auth.
+async function resolveStore() {
+  if (_resolved) return _resolved;
+  const tried = [];
+  let lastErr = null;
+  for (const mode of candidates()) {
+    try {
+      const store = build(mode);
+      await store.get('__probe', { type: 'json' });
+      _resolved = { store, mode };
+      _lastError = null;
+      return _resolved;
+    } catch (err) {
+      tried.push(mode);
+      lastErr = err;
+      console.error('stock-store: ' + mode + ' auth failed -', String(err && err.message || err));
+    }
+  }
+  _lastError = tag(lastErr, tried);
+  throw _lastError;
+}
+
 async function getStockRecord(ticker) {
+  const { store } = await resolveStore();
   try {
-    return await stockStore().get(ticker.toUpperCase(), { type: 'json' });
-  } catch (err) { throw tag(err); }
+    return await store.get(ticker.toUpperCase(), { type: 'json' });
+  } catch (err) { throw tag(err, [_resolved && _resolved.mode]); }
 }
 
 async function setStockRecord(ticker, record) {
+  const { store } = await resolveStore();
   try {
-    await stockStore().set(ticker.toUpperCase(), JSON.stringify({ ...record, updatedAt: Date.now() }));
-  } catch (err) { throw tag(err); }
+    await store.set(ticker.toUpperCase(), JSON.stringify({ ...record, updatedAt: Date.now() }));
+  } catch (err) { throw tag(err, [_resolved && _resolved.mode]); }
 }
 
-// Cheap round-trip to tell a working store from a misconfigured one, so callers
-// can fail fast with a real reason instead of N identical per-ticker errors.
+// Tell a working store from a misconfigured one, naming the mode that won so a
+// silent fallback is still visible in the logs.
 async function probeStore() {
   try {
-    await stockStore().get('__probe', { type: 'json' });
-    return { ok: true, mode: blobsMode() };
+    const { mode } = await resolveStore();
+    return { ok: true, mode };
   } catch (err) {
-    const e = tag(err);
-    return { ok: false, mode: e.blobsMode, error: e.message, hint: e.hint };
+    return { ok: false, mode: 'none', tried: err.tried, error: err.message, hint: err.hint };
   }
 }
 
-module.exports = { stockStore, getStockRecord, setStockRecord, probeStore, blobsMode };
+async function stockStore() {
+  const { store } = await resolveStore();
+  return store;
+}
+
+module.exports = { stockStore, getStockRecord, setStockRecord, probeStore, STORE_NAME };

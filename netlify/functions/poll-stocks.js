@@ -24,12 +24,12 @@ const CURSOR_KEY = '__poll_cursor';
 
 async function readCursor() {
   try {
-    const rec = await stockStore().get(CURSOR_KEY, { type: 'json' });
+    const rec = await (await stockStore()).get(CURSOR_KEY, { type: 'json' });
     return (rec && typeof rec.i === 'number') ? rec.i : 0;
   } catch (e) { return 0; }
 }
 async function writeCursor(i) {
-  try { await stockStore().set(CURSOR_KEY, JSON.stringify({ i })); } catch (e) { /* non-fatal */ }
+  try { await (await stockStore()).set(CURSOR_KEY, JSON.stringify({ i })); } catch (e) { /* non-fatal */ }
 }
 
 async function getJson(url) {
@@ -48,12 +48,13 @@ exports.handler = async () => {
   // quota to write nowhere is also pointless.
   const store = await probeStore();
   if (!store.ok) {
-    console.error('poll-stocks: store unavailable (' + store.mode + ') -', store.error, '|', store.hint || '');
+    console.error('poll-stocks: store unavailable, tried [' + (store.tried || []).join(', ') + '] -', store.error, '|', store.hint || '');
     return {
       statusCode: 200,
-      body: JSON.stringify({ ok: false, storeUnavailable: true, mode: store.mode, error: store.error, hint: store.hint, at: new Date().toISOString() }),
+      body: JSON.stringify({ ok: false, storeUnavailable: true, tried: store.tried, error: store.error, hint: store.hint, at: new Date().toISOString() }),
     };
   }
+  console.log('poll-stocks: store authenticated via', store.mode);
 
   const start = await readCursor();
   const slice = [];
