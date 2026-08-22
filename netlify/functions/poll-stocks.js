@@ -14,7 +14,10 @@
 const { stockStore, getStockRecord, setStockRecord } = require('./lib/stock-store');
 const TICKERS = require('./lib/tracked-tickers');
 
-const CHUNK = 20;              // tickers refreshed per run (~20 quote calls)
+// Universe is 88 tickers. At 24/run every 2 min the full list comes around in
+// ~7.3 min, which must stay under quotes.js STORE_TTL_MS (15 min) or records
+// expire before the rotation returns to them.
+const CHUNK = 24;              // tickers refreshed per run (~24 quote calls)
 const MAX_ANALYST_PER_RUN = 8; // ratings move slowly; refresh a few per run
 const ANALYST_TTL_MS = 12 * 60 * 60 * 1000;
 const CURSOR_KEY = '__poll_cursor';

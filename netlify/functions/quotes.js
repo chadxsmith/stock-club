@@ -8,8 +8,9 @@ let _cache = new Map(); // symbol -> { at, data }
 let _rateLimitedUntil = 0; // set on a 429 — stop calling Finnhub until it passes
 const RATE_LIMIT_COOLDOWN_MS = 60 * 1000;
 const CACHE_TTL_MS = 60 * 1000;
-// Poller runs every 2 min; accept a store record up to 10 min old before going live.
-const STORE_TTL_MS = 10 * 60 * 1000;
+// Poller rotates the full 88-ticker universe in ~7.3 min; accept a store record
+// up to 15 min old before going live, so a record never expires mid-rotation.
+const STORE_TTL_MS = 15 * 60 * 1000;
 
 exports.handler = async (event) => {
   const cors = {
