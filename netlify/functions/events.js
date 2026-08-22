@@ -2,7 +2,7 @@
 // POST /.netlify/functions/events   { type, meta, ts }   -> append one event
 // GET  /.netlify/functions/events                        -> { events: [...] }
 // DELETE /.netlify/functions/events                       -> clear store
-const { getStore } = require('@netlify/blobs');
+const { resolveStore } = require('./lib/blob-store');
 
 const MAX_EVENTS = 5000;
 
@@ -14,9 +14,7 @@ exports.handler = async (event) => {
   };
   if (event.httpMethod === 'OPTIONS') return { statusCode: 200, headers: cors, body: '' };
 
-  const store = process.env.BLOBS_SITE_ID && process.env.BLOBS_TOKEN
-    ? getStore({ name: 'mm-usage-events', siteID: process.env.BLOBS_SITE_ID, token: process.env.BLOBS_TOKEN })
-    : getStore('mm-usage-events');
+  const store = await resolveStore('mm-usage-events');
   const KEY = 'events.json';
 
   if (event.httpMethod === 'GET') {

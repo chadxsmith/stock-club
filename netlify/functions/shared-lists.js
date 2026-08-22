@@ -6,7 +6,7 @@
 //   action "removeStock" { listId, ticker }                  -> remove a ticker
 //   action "createList"  { name, avatarColors, email, name2 } -> create a new shared list, returns { id }
 //   action "join"        { listId, email, name }             -> register a real member on a list
-const { getStore } = require('@netlify/blobs');
+const { resolveStore } = require('./lib/blob-store');
 
 const KEY = 'shared-lists.json';
 const DEFAULT_DATA = {
@@ -51,9 +51,7 @@ async function sendStockAddedEmails(listName, listId, ticker, addedBy, members) 
 }
 
 function getStoreInstance() {
-  return process.env.BLOBS_SITE_ID && process.env.BLOBS_TOKEN
-    ? getStore({ name: 'mm-shared-lists', siteID: process.env.BLOBS_SITE_ID, token: process.env.BLOBS_TOKEN })
-    : getStore('mm-shared-lists');
+  return resolveStore('mm-shared-lists');
 }
 
 function withMemberCounts(data) {
@@ -74,7 +72,7 @@ exports.handler = async (event) => {
   };
   if (event.httpMethod === 'OPTIONS') return { statusCode: 200, headers: cors, body: '' };
 
-  const store = getStoreInstance();
+  const store = await getStoreInstance();
 
   if (event.httpMethod === 'GET') {
     const data = (await store.get(KEY, { type: 'json' })) || DEFAULT_DATA;

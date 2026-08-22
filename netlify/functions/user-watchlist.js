@@ -1,12 +1,10 @@
 // Netlify Function: per-account personal watchlist store via Netlify Blobs.
 // GET  /.netlify/functions/user-watchlist?email=x       -> { tickers: [...] }
 // POST /.netlify/functions/user-watchlist { email, tickers } -> saves full list, returns { ok: true, tickers }
-const { getStore } = require('@netlify/blobs');
+const { resolveStore } = require('./lib/blob-store');
 
 function getStoreInstance() {
-  return process.env.BLOBS_SITE_ID && process.env.BLOBS_TOKEN
-    ? getStore({ name: 'mm-user-watchlists', siteID: process.env.BLOBS_SITE_ID, token: process.env.BLOBS_TOKEN })
-    : getStore('mm-user-watchlists');
+  return resolveStore('mm-user-watchlists');
 }
 
 function keyFor(email) {
@@ -21,7 +19,7 @@ exports.handler = async (event) => {
   };
   if (event.httpMethod === 'OPTIONS') return { statusCode: 200, headers: cors, body: '' };
 
-  const store = getStoreInstance();
+  const store = await getStoreInstance();
 
   if (event.httpMethod === 'GET') {
     const email = keyFor((event.queryStringParameters || {}).email);
